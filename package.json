@@ -1,0 +1,63 @@
+{
+  "name": "export-sweep",
+  "version": "0.1.0",
+  "description": "Find exports nobody imports in TypeScript and JavaScript projects, plus files nothing uses. Follows re-exports, path aliases and dynamic imports. Zero dependencies, works with any TypeScript version.",
+  "keywords": [
+    "unused-exports",
+    "dead-code",
+    "typescript",
+    "javascript",
+    "exports",
+    "unused",
+    "lint",
+    "ts-prune",
+    "knip",
+    "cli"
+  ],
+  "homepage": "https://github.com/acus9345/export-sweep#readme",
+  "bugs": {
+    "url": "https://github.com/acus9345/export-sweep/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acus9345/export-sweep.git"
+  },
+  "license": "MIT",
+  "author": "acus9345 <acus9345@gmail.com>",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "export-sweep": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prelint": "npm run build",
+    "lint": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "node --test \"test/*.test.ts\"",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
