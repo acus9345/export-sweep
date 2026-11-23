@@ -37,6 +37,7 @@ export interface ModuleInfo {
 
 const DECL_KEYWORDS = new Set(["function", "class", "const", "let", "var", "interface", "type", "enum", "namespace", "module", "using"]);
 const STATEMENT_START = new Set(["export", "import", "const", "let", "var", "function", "class", "interface", "type", "enum", "declare", "namespace", "abstract", "if", "for", "while", "do", "switch", "try", "return", "throw"]);
+const DEFAULT_NON_IDENT = new Set(["true", "false", "null", "undefined", "this", "super", "new", "typeof", "void", "delete", "await", "yield", "function", "class"]);
 
 /** Parse one module's imports and exports. */
 export function parseModule(source: string, jsx: boolean): ModuleInfo {
@@ -53,13 +54,20 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
   for (const c of comments) {
     if (/\bexport-sweep-ignore-file\b/.test(c.text)) info.ignoreFile = true;
     else if (/\bexport-sweep-ignore\b/.test(c.text)) {
-      info.ignoredLines.add(c.line);
-      info.ignoredLines.add(c.line + 1);
+      const endLine = c.line + (c.text.match(/\n/g)?.length ?? 0);
+      for (let line = c.line; line <= endLine + 1; line++) info.ignoredLines.add(line);
     }
   }
 
   const importBindings = new Map<string, { source: string; name: string }>();
-  const exportSpecifierTokens = new Set<number>();
+  const exportDeclTokens = new Set<number>();
+  /** Local identifier name -> exported name(s) backed by it. */
+  const localExports = new Map<string, string[]>();
+  const addLocalExport = (localName: string, exportName: string) => {
+    const existing = localExports.get(localName);
+    if (existing === undefined) localExports.set(localName, [exportName]);
+    else if (!existing.includes(exportName)) existing.push(exportName);
+  };
   let depth = 0;
   const at = (k: number): Token | undefined => tokens[k];
   const is = (k: number, value: string, type?: Token["type"]) => {
@@ -83,8 +91,8 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
   };
 
   /** Parse `{ a, b as c, type d }`. Returns specifiers and the index after `}`. */
-  const specifiers = (k: number): { list: { name: string; alias: string; typeOnly: boolean; tokenIndex: number }[]; next: number } => {
-    const list: { name: string; alias: string; typeOnly: boolean; tokenIndex: number }[] = [];
+  const specifiers = (k: number): { list: { name: string; alias: string; typeOnly: boolean; tokenIndex: number; aliasTokenIndex: number }[]; next: number } => {
+    const list: { name: string; alias: string; typeOnly: boolean; tokenIndex: number; aliasTokenIndex: number }[] = [];
     let j = k + 1;
     while (j < tokens.length && !is(j, "}")) {
       let typeOnly = false;
@@ -97,21 +105,23 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
       const name = t.value;
       const tokenIndex = j;
       let alias = name;
+      let aliasTokenIndex = j;
       j++;
       if (is(j, "as")) {
         alias = at(j + 1)?.value ?? name;
+        aliasTokenIndex = j + 1;
         j += 2;
       }
-      list.push({ name, alias, typeOnly, tokenIndex });
+      list.push({ name, alias, typeOnly, tokenIndex, aliasTokenIndex });
       if (is(j, ",")) j++;
     }
     return { list, next: j + 1 };
   };
 
   /** Binding names in a destructuring pattern starting at `{` or `[`. Returns names and index after the pattern. */
-  const patternNames = (k: number): { names: Token[]; next: number } => {
+  const patternNames = (k: number): { names: { token: Token; index: number }[]; next: number } => {
     const end = skipBalanced(k);
-    const names: Token[] = [];
+    const names: { token: Token; index: number }[] = [];
     // Depth of brackets opened inside a default value; while > 0 or right after `=`, nothing is a binding.
     let inDefault = false;
     let defaultDepth = 0;
@@ -136,9 +146,65 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
       // `{ key: binding }`: the key isn't a binding.
       const next = tokens[j + 1];
       if (next?.type === "punct" && next.value === ":") continue;
-      names.push(t);
+      names.push({ token: t, index: j });
     }
     return { names, next: end };
+  };
+
+  /** If `<` at `k` starts a generic argument/parameter list (`foo<A, B>()`, `<T, U>(x) => ...`), return the index of its closing `>`. */
+  const skipGenericArgs = (k: number): number | undefined => {
+    const prev = tokens[k - 1];
+    const prev2 = tokens[k - 2];
+    const allowDefault =
+      (prev?.type === "punct" && (prev.value === "=" || prev.value === "=>" || prev.value === "?" || prev.value === ":" || prev.value === "(" || prev.value === "[" || prev.value === ",")) ||
+      (prev?.type === "ident" && (prev.value === "async" || prev.value === "function" || prev.value === "class")) ||
+      (prev2?.type === "ident" && (prev2.value === "function" || prev2.value === "class"));
+    let angle = 0;
+    let paren = 0;
+    let sawEq = false;
+    for (let j = k; j < tokens.length; j++) {
+      const t = tokens[j]!;
+      if (t.type !== "punct") continue;
+      if (t.value === "(" || t.value === "[" || t.value === "{" || t.value === "${") paren++;
+      else if (t.value === ")" || t.value === "]" || t.value === "}") {
+        if (paren === 0) return undefined;
+        paren--;
+      } else if (paren === 0) {
+        if (t.value === "<") angle++;
+        else if (t.value === ">" || t.value === ">>" || t.value === ">>>") {
+          angle -= t.value.length;
+          if (angle <= 0) {
+            if (angle < 0) return undefined;
+            const after = tokens[j + 1];
+            if (sawEq) {
+              if (
+                after !== undefined &&
+                ((after.type === "punct" && (after.value === "(" || after.value === "{")) ||
+                  (after.type === "ident" && (after.value === "extends" || after.value === "implements")))
+              ) {
+                return j;
+              }
+              return undefined;
+            }
+            if (
+              after === undefined ||
+              (after.type === "punct" && (after.value === "(" || after.value === "," || after.value === ";" || after.value === ")" || after.value === "]" || after.value === "}" || after.value === "." || after.value === "?.")) ||
+              after.type === "template" ||
+              after.line > t.line
+            ) {
+              return j;
+            }
+            return undefined;
+          }
+        } else if (t.value === "=") {
+          if (!allowDefault) return undefined;
+          sawEq = true;
+        } else if (t.value === ";" || t.value === "&&" || t.value === "||" || t.value === "??" || t.value === "==" || t.value === "===" || t.value === "!=" || t.value === "!==" || t.value === "<=" || t.value === ">=") {
+          return undefined;
+        }
+      }
+    }
+    return undefined;
   };
 
   /** Skip a variable initializer: to the next top-level `,` (returns true) or the end of the statement. */
@@ -152,8 +218,12 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
         if (inType && d === 0 && t.value === "=") inType = false;
         if (inType && t.value === "<") d++;
         else if (inType && t.value === ">" && d > 0) d--;
-        else if (inType && t.value === ">>" && d > 1) d -= 2;
-        else if (t.value === "{" || t.value === "(" || t.value === "[" || t.value === "${") d++;
+        else if (inType && t.value === ">>" && d > 0) d = Math.max(0, d - 2);
+        else if (inType && t.value === ">>>" && d > 0) d = Math.max(0, d - 3);
+        else if (!inType && d === 0 && t.value === "<") {
+          const close = skipGenericArgs(j);
+          if (close !== undefined) j = close;
+        } else if (t.value === "{" || t.value === "(" || t.value === "[" || t.value === "${") d++;
         else if (t.value === "}" || t.value === ")" || t.value === "]") {
           if (d === 0) return { next: j, more: false };
           d--;
@@ -267,6 +337,47 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
     // export default ...
     if (is(j, "default")) {
       addExport("default", "value", t);
+      let n = j + 1;
+      while (is(n, "declare") || is(n, "abstract") || (is(n, "async") && at(n + 1)?.line === at(n)?.line)) n++;
+      if (is(n, "function") || is(n, "class")) {
+        let nameIdx = n + 1;
+        if (is(n, "function") && is(nameIdx, "*")) nameIdx++;
+        const name = at(nameIdx);
+        if (name?.type === "ident" && name.value !== "extends" && name.value !== "implements") {
+          exportDeclTokens.add(nameIdx);
+          addLocalExport(name.value, "default");
+        }
+      } else {
+        let exprIdx = j + 1;
+        let parens = 0;
+        while (is(exprIdx, "(")) {
+          parens++;
+          exprIdx++;
+        }
+        const expr = at(exprIdx);
+        let afterIdx = exprIdx + 1;
+        let closed = true;
+        for (let p = 0; p < parens; p++) {
+          if (!is(afterIdx, ")")) {
+            closed = false;
+            break;
+          }
+          afterIdx++;
+        }
+        if (closed && expr?.type === "ident" && !DEFAULT_NON_IDENT.has(expr.value) && !importBindings.has(expr.value)) {
+          const endTok = at(afterIdx - 1)!;
+          const afterExpr = at(afterIdx);
+          const endsExpr =
+            afterExpr === undefined ||
+            is(afterIdx, ";") ||
+            (afterExpr.line > endTok.line &&
+              !(afterExpr.type === "punct" && /^(?:\.|\?\.|\(|\[|\+|-|\*|\/|%|&&|\|\||\?\?|\?|:|==|===|!=|!==|<|>|<=|>=|=>)$/.test(afterExpr.value)));
+          if (endsExpr) {
+            exportDeclTokens.add(exprIdx);
+            addLocalExport(expr.value, "default");
+          }
+        }
+      }
       continue;
     }
 
@@ -301,12 +412,14 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
       const from = is(after, "from") && at(after + 1)?.type === "string" ? at(after + 1)!.value : undefined;
       for (const s of list) {
         const tok = at(s.tokenIndex)!;
-        exportSpecifierTokens.add(s.tokenIndex);
+        exportDeclTokens.add(s.tokenIndex);
+        exportDeclTokens.add(s.aliasTokenIndex);
         const kind = typeList || s.typeOnly ? "type" : "value";
         if (from !== undefined) addExport(s.alias, kind, tok, { source: from, name: s.name });
         else {
           const imported = importBindings.get(s.name);
           addExport(s.alias, kind, tok, imported);
+          if (imported === undefined) addLocalExport(s.name, s.alias);
         }
       }
       if (from !== undefined) info.imports.push({ source: from, names: [], typeOnly: typeList, line: t.line });
@@ -319,34 +432,59 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
     if (kw === "import") {
       // export import A = B.C
       const name = at(j + 1);
-      if (name?.type === "ident") addExport(name.value, "value", name);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(j + 1);
+        addExport(name.value, "value", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "function" || kw === "class") {
       let n = j + 1;
       if (is(n, "*")) n++;
       const name = at(n);
-      if (name?.type === "ident") addExport(name.value, "value", name);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(n);
+        addExport(name.value, "value", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "enum" || (kw === "const" && is(j + 1, "enum"))) {
-      const name = at(kw === "enum" ? j + 1 : j + 2);
-      if (name?.type === "ident") addExport(name.value, "value", name);
+      const nameIdx = kw === "enum" ? j + 1 : j + 2;
+      const name = at(nameIdx);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(nameIdx);
+        addExport(name.value, "value", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "namespace" || kw === "module") {
       const name = at(j + 1);
-      if (name?.type === "ident") addExport(name.value, "value", name);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(j + 1);
+        addExport(name.value, "value", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "interface") {
       const name = at(j + 1);
-      if (name?.type === "ident") addExport(name.value, "type", name);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(j + 1);
+        addExport(name.value, "type", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "type") {
       const name = at(j + 1);
-      if (name?.type === "ident") addExport(name.value, "type", name);
+      if (name?.type === "ident") {
+        exportDeclTokens.add(j + 1);
+        addExport(name.value, "type", name);
+        addLocalExport(name.value, name.value);
+      }
       continue;
     }
     if (kw === "const" || kw === "let" || kw === "var" || kw === "using") {
@@ -355,11 +493,17 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
         const head = at(n);
         if (head === undefined) break;
         if (head.type === "ident") {
+          exportDeclTokens.add(n);
           addExport(head.value, "value", head);
+          addLocalExport(head.value, head.value);
           n++;
         } else if (is(n, "{") || is(n, "[")) {
           const { names, next: after } = patternNames(n);
-          for (const nm of names) addExport(nm.value, "value", nm);
+          for (const nm of names) {
+            exportDeclTokens.add(nm.index);
+            addExport(nm.token.value, "value", nm.token);
+            addLocalExport(nm.token.value, nm.token.value);
+          }
           n = after;
         } else break;
         // Skip `: Type` and `= value` up to the next declarator.
@@ -372,11 +516,12 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
   }
 
   // Which exports are also referenced inside the file (beyond their own declaration)?
-  const exported = new Set(info.exports.filter((e) => e.from === undefined).map((e) => e.name));
-  if (exported.size > 0) {
+  if (localExports.size > 0) {
     for (let k = 0; k < tokens.length; k++) {
       const t = tokens[k]!;
-      if (t.type !== "ident" || !exported.has(t.value) || exportSpecifierTokens.has(k)) continue;
+      if (t.type !== "ident" || exportDeclTokens.has(k)) continue;
+      const exportNames = localExports.get(t.value);
+      if (exportNames === undefined) continue;
       const prev = tokens[k - 1];
       const next = tokens[k + 1];
       if (prev?.type === "punct" && (prev.value === "." || prev.value === "?.")) continue;
@@ -385,7 +530,7 @@ export function parseModule(source: string, jsx: boolean): ModuleInfo {
       // Object keys (`{ name: 1 }`) and destructured declarations are not uses.
       if (next?.type === "punct" && next.value === ":" && prev?.type === "punct" && (prev.value === "{" || prev.value === ",")) continue;
       if (isDeclaredInPattern(tokens, k)) continue;
-      info.usedLocally.add(t.value);
+      for (const name of exportNames) info.usedLocally.add(name);
     }
   }
   return info;

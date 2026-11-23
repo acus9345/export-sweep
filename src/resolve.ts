@@ -5,34 +5,38 @@ export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", 
 
 /** Parse JSON with comments and trailing commas (tsconfig style). */
 export function parseJsonc(text: string): unknown {
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   let out = "";
   let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
     if (inString) {
       out += c;
-      if (c === "\\") out += text[++i] ?? "";
+      if (c === "\\") out += src[++i] ?? "";
       else if (c === '"') inString = false;
       continue;
     }
     if (c === '"') {
       inString = true;
       out += c;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
       out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      i = end === -1 ? text.length : end + 1;
+    } else if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
     } else out += c;
   }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+  const stripped = out.replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, close: string | undefined) => (close === undefined ? m : close));
+  return JSON.parse(stripped);
 }
 
 /** The parts of tsconfig that matter for resolving imports. */
 export interface PathConfig {
-  /** Absolute folder `paths` are relative to. */
+  /** Absolute folder for bare `baseUrl` imports, when `baseUrl` is configured. */
   baseUrl: string | undefined;
+  /** Absolute folder `paths` are relative to when `baseUrl` is not set. */
+  pathsBase?: string | undefined;
   paths: Record<string, string[]>;
   rootDir: string | undefined;
   outDir: string | undefined;
@@ -64,7 +68,7 @@ export function readPathConfig(root: string, file?: string): PathConfig {
     if (typeof o.baseUrl === "string") config.baseUrl = resolve(dir, o.baseUrl);
     if (o.paths && typeof o.paths === "object") {
       // `paths` without baseUrl are relative to the config that declares them.
-      config.baseUrl ??= dir;
+      config.pathsBase = dir;
       config.paths = { ...(o.paths as Record<string, string[]>) };
     }
     if (typeof o.rootDir === "string") config.rootDir = resolve(dir, o.rootDir);
@@ -94,7 +98,7 @@ export class Resolver {
   }
 
   resolve(specifier: string, fromFile: string): string | undefined {
-    const clean = specifier.replace(/[?#].*$/, "");
+    const clean = specifier.startsWith("#") ? `#${specifier.slice(1).replace(/[?#].*$/, "")}` : specifier.replace(/[?#].*$/, "");
     if (clean.startsWith(".") || clean.startsWith("/")) return this.#file(resolve(dirname(fromFile), clean));
     if (clean.startsWith("#") && this.#imports) {
       for (const target of matchMap(this.#imports, clean)) {
@@ -106,7 +110,7 @@ export class Resolver {
       const star = matchPattern(pattern, clean);
       if (star === undefined) continue;
       for (const target of targets) {
-        const found = this.#file(resolve(this.#config.baseUrl ?? this.#root, target.replace("*", star)));
+        const found = this.#file(resolve(this.#config.baseUrl ?? this.#config.pathsBase ?? this.#root, target.replace("*", () => star)));
         if (found) return found;
       }
     }
@@ -168,7 +172,7 @@ function matchMap(map: Record<string, unknown>, spec: string): string[] {
   for (const [key, value] of Object.entries(map)) {
     const star = matchPattern(key, spec);
     if (star === undefined) continue;
-    for (const target of flattenTargets(value)) out.push(target.replace("*", star));
+    for (const target of flattenTargets(value)) out.push(target.replace("*", () => star));
   }
   return out;
 }

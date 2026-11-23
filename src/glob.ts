@@ -8,7 +8,7 @@ const cache = new Map<string, RegExp>();
 function globToRegExp(glob: string): RegExp {
   const cached = cache.get(glob);
   if (cached !== undefined) return cached;
-  let pattern = glob.trim().replace(/^\.\//, "");
+  let pattern = glob.trim().replace(/\\/g, "/").replace(/^\.\//, "");
   if (pattern.startsWith("/")) pattern = pattern.slice(1);
   else if (!pattern.includes("/")) pattern = `**/${pattern}`;
   if (pattern.endsWith("/")) pattern += "**";

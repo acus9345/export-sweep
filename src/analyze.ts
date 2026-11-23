@@ -123,18 +123,25 @@ export function sweep(options: SweepOptions = {}): SweepResult {
 
   const used = new Map<string, Set<string>>();
   const allUsed = new Set<string>();
+  const starUsed = new Set<string>();
   const incoming = new Set<string>();
   const target = (source: string, from: string) => resolver.resolve(source, from);
 
-  const markAll = (file: string): void => {
+  const markAll = (file: string, includeDefault = true): void => {
     if (allUsed.has(file)) return;
-    allUsed.add(file);
+    if (includeDefault) allUsed.add(file);
+    else {
+      if (starUsed.has(file)) return;
+      starUsed.add(file);
+    }
     const mod = modules.get(file);
     if (!mod) return;
-    for (const e of mod.exports) markUsed(file, e.name);
+    for (const e of mod.exports) {
+      if (includeDefault || e.name !== "default") markUsed(file, e.name);
+    }
     for (const s of mod.starExports) {
       const t = target(s, file);
-      if (t) markAll(t);
+      if (t) markAll(t, false);
     }
   };
   const markUsed = (file: string, name: string): void => {

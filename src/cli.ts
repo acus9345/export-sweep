@@ -111,7 +111,7 @@ function run(argv: string[]): number {
     lines.push(bold(file));
     const width = Math.max(...list.map((u) => u.name.length));
     for (const u of list) {
-      const where = `${u.line}:${u.col}`.padEnd(8);
+      const where = `${`${u.line}:${u.col}`.padEnd(7)} `;
       const notes = [u.kind === "type" ? "type" : "", u.reexport ? "re-export" : "", u.usedInFile ? "used in this file only: drop the export keyword" : ""].filter(Boolean).join(", ");
       lines.push(`  ${dim(where)}${u.name}${notes ? `${" ".repeat(width - u.name.length + 2)}${dim(notes)}` : ""}`);
     }
